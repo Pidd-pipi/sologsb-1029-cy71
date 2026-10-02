@@ -1,7 +1,26 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { courseForLesson, exportRecords, lessonById, persist, saveAttempt, setDownloaded, state, updateTokenClassification } from './store';
-import type { ErrorCategory, Lesson, PracticeAttempt, PracticeView } from './types';
+import {
+  cancelConflict,
+  confirmMerge,
+  courseForLesson,
+  exportRecords,
+  flushProgress,
+  getDisplayProgress,
+  lessonById,
+  markLessonKnown,
+  pendingConflicts,
+  retryInit,
+  saveBanner,
+  saveClassification as saveClassificationOp,
+  saveFeedback,
+  setDownloaded,
+  state,
+  submitAttempt,
+  syncFromLedger,
+  updateAnswer
+} from './store';
+import type { ErrorCategory, Lesson, PracticeView } from './types';
 import { compareSentence, scoreAttempt, segmentText } from './utils';
 
 const view = ref<PracticeView>(state.activeLessonId ? 'practice' : 'library');
@@ -22,7 +41,7 @@ const currentSentence = computed(() => {
   if (!lesson) return undefined;
   return lesson.sentences.find((sentence) => sentence.id === state.activeSentenceId) ?? lesson.sentences[0];
 });
-const activeProgress = computed(() => activeLesson.value ? state.progress[activeLesson.value.id] : undefined);
+const activeProgress = computed(() => activeLesson.value ? getDisplayProgress(activeLesson.value.id) : undefined);
 const currentAnswer = ref('');
 const currentIndex = computed(() => {
   if (!activeLesson.value || !currentSentence.value) return 0;
@@ -58,22 +77,19 @@ watch(currentAnswer, (value) => {
   const lesson = activeLesson.value;
   const sentence = currentSentence.value;
   if (!lesson || !sentence) return;
-  const progress = state.progress[lesson.id] ?? { answers: {}, activeSentenceId: sentence.id, updatedAt: new Date().toISOString() };
-  progress.answers[sentence.id] = value;
-  progress.activeSentenceId = sentence.id;
-  progress.updatedAt = new Date().toISOString();
-  state.progress[lesson.id] = progress;
+  updateAnswer(lesson.id, sentence.id, value);
 });
 
 watch(activeLesson, (lesson) => {
   if (!lesson) return;
   state.activeLessonId = lesson.id;
-  state.activeSentenceId = currentSentence.value?.id ?? lesson.sentences[0].id;
-  const progress = state.progress[lesson.id] ?? { answers: {}, activeSentenceId: lesson.sentences[0].id, updatedAt: new Date().toISOString() };
-  if (!lesson.sentences.some((sentence) => sentence.id === progress.activeSentenceId)) progress.activeSentenceId = lesson.sentences[0].id;
-  state.progress[lesson.id] = progress;
-  state.activeSentenceId = progress.activeSentenceId;
-  currentAnswer.value = progress.answers[state.activeSentenceId] ?? '';
+  const merged = getDisplayProgress(lesson.id);
+  const activeId = lesson.sentences.some((sentence) => sentence.id === merged.activeSentenceId)
+    ? merged.activeSentenceId
+    : lesson.sentences[0].id;
+  state.activeSentenceId = activeId;
+  currentAnswer.value = merged.answers[activeId] ?? '';
+  markLessonKnown(lesson.id);
 });
 
 watch(teacherAttemptId, (id) => {
@@ -87,26 +103,23 @@ function notify(message: string) {
 }
 
 function startLesson(lesson: Lesson) {
-  const progress = state.progress[lesson.id] ?? { answers: {}, activeSentenceId: lesson.sentences[0].id, updatedAt: new Date().toISOString() };
-  state.progress[lesson.id] = progress;
+  const merged = getDisplayProgress(lesson.id);
   state.activeLessonId = lesson.id;
-  state.activeSentenceId = progress.activeSentenceId || lesson.sentences[0].id;
-  currentAnswer.value = progress.answers[state.activeSentenceId] ?? '';
+  state.activeSentenceId = lesson.sentences.some((s) => s.id === merged.activeSentenceId)
+    ? merged.activeSentenceId
+    : lesson.sentences[0].id;
+  currentAnswer.value = merged.answers[state.activeSentenceId] ?? '';
+  markLessonKnown(lesson.id);
   view.value = 'practice';
-  persist();
 }
 
 function goToSentence(index: number) {
   const lesson = activeLesson.value;
   if (!lesson || !lesson.sentences[index]) return;
   const target = lesson.sentences[index];
+  flushProgress(lesson.id);
   state.activeSentenceId = target.id;
-  const progress = state.progress[lesson.id];
-  if (progress) {
-    progress.activeSentenceId = target.id;
-    progress.updatedAt = new Date().toISOString();
-  }
-  currentAnswer.value = progress?.answers[target.id] ?? '';
+  currentAnswer.value = getDisplayProgress(lesson.id).answers[target.id] ?? '';
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
 
@@ -114,8 +127,8 @@ function submitLesson() {
   const lesson = activeLesson.value;
   const course = activeCourse.value;
   if (!lesson || !course) return;
-  const progress = state.progress[lesson.id];
-  const answeredCount = lesson.sentences.filter((sentence) => (progress?.answers[sentence.id] ?? '').trim()).length;
+  const progress = getDisplayProgress(lesson.id);
+  const answeredCount = lesson.sentences.filter((sentence) => (progress.answers[sentence.id] ?? '').trim()).length;
   if (!answeredCount) {
     notify('请至少输入一句话再提交');
     return;
@@ -123,27 +136,18 @@ function submitLesson() {
   if (answeredCount < lesson.sentences.length && !window.confirm(`还有 ${lesson.sentences.length - answeredCount} 句未作答，仍然提交吗？`)) return;
   const sentenceAttempts = lesson.sentences.map((sentence) => {
     const source = sentence.text;
-    const answer = progress?.answers[sentence.id] ?? '';
+    const answer = progress.answers[sentence.id] ?? '';
     const tokens = compareSentence(source, answer);
     const correct = tokens.filter((token) => token.correct).length;
     return { sentenceId: sentence.id, source, answer, tokens, score: tokens.length ? Math.round((correct / tokens.length) * 100) : 0 };
   });
-  const attempt: PracticeAttempt = {
-    id: `attempt-${Date.now()}`,
-    lessonId: lesson.id,
-    lessonTitle: lesson.title,
-    courseTitle: course.title,
-    submittedAt: new Date().toISOString(),
-    score: scoreAttempt(sentenceAttempts),
-    sentenceAttempts,
-    teacherFeedback: ''
-  };
-  saveAttempt(attempt);
-  resultAttemptId.value = attempt.id;
+  const score = scoreAttempt(sentenceAttempts);
+  const newAttemptId = submitAttempt(lesson.id, lesson.title, course.title, sentenceAttempts, score);
+  if (!newAttemptId) return; // 冲突未解决，草稿已保留，停留在作答页
+  resultAttemptId.value = newAttemptId;
   selectedResultSentence.value = 0;
   syncSegment();
   view.value = 'result';
-  persist();
   notify('已提交，逐词结果已生成');
 }
 
@@ -178,16 +182,14 @@ function selectResultSentence(index: number) {
 }
 
 function saveClassification(attemptId: string, sentenceId: string, tokenIndex: number, category: ErrorCategory, reason: string) {
-  updateTokenClassification(attemptId, sentenceId, tokenIndex, { category, reason });
-  persist();
+  saveClassificationOp(attemptId, sentenceId, tokenIndex, category, reason);
 }
 
 function saveTeacherFeedback() {
   const attempt = teacherAttempt.value;
   if (!attempt) return;
-  attempt.teacherFeedback = teacherDraft.value.trim();
-  persist();
-  notify('教师反馈已保存');
+  const ok = saveFeedback(attempt.id, teacherDraft.value.trim());
+  if (ok) notify('教师反馈已保存');
 }
 
 function toggleTheme() {
@@ -213,28 +215,81 @@ function formatDate(value: string): string {
   return new Date(value).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
+const activeConflict = computed(() => pendingConflicts[0]);
+const conflictModalOpen = ref(false);
+
+// 检测到新冲突时自动弹出模态框；关闭后横幅仍保留作为提醒，可随时重新打开。
+watch(pendingConflicts, (conflicts) => {
+  if (conflicts.length) conflictModalOpen.value = true;
+});
+
+function openConflictModal() {
+  conflictModalOpen.value = true;
+  saveBanner.show = false;
+}
+
+function onConfirmMerge(conflict: Parameters<typeof confirmMerge>[0]) {
+  confirmMerge(conflict);
+  if (!pendingConflicts.length) conflictModalOpen.value = false;
+}
+
+function onCancelConflict(conflict: Parameters<typeof cancelConflict>[0]) {
+  cancelConflict(conflict);
+  if (!pendingConflicts.length) conflictModalOpen.value = false;
+}
+
+function sentenceNumber(lessonId: string, sentenceId?: string): string {
+  if (!sentenceId) return '';
+  const lesson = lessonById(lessonId);
+  if (!lesson) return '';
+  const idx = lesson.sentences.findIndex((s) => s.id === sentenceId);
+  return idx >= 0 ? `第 ${idx + 1} 句` : '';
+}
+
+function conflictChangeLabel(change: { kind: string; lessonId: string; sentenceId?: string; label: string }): string {
+  if (change.kind === 'progress' && change.sentenceId) {
+    return `${sentenceNumber(change.lessonId, change.sentenceId)}答案已在别处更新`;
+  }
+  return change.label;
+}
+
+function retrySave() {
+  if (saveBanner.kind === 'replay' || saveBanner.kind === 'migration') retryInit();
+  else syncFromLedger();
+}
+
 function onConnectionChange() {
   online.value = navigator.onLine;
-  persist();
+  if (navigator.onLine) syncFromLedger();
 }
 
 function onVisibilityChange() {
-  if (document.visibilityState === 'hidden') persist();
+  const lesson = activeLesson.value;
+  if (document.visibilityState === 'hidden') {
+    if (lesson) flushProgress(lesson.id);
+  } else {
+    syncFromLedger();
+  }
+}
+
+function onPageHide() {
+  const lesson = activeLesson.value;
+  if (lesson) flushProgress(lesson.id);
 }
 
 onMounted(() => {
+  if (activeLesson.value) markLessonKnown(activeLesson.value.id);
   window.addEventListener('online', onConnectionChange);
   window.addEventListener('offline', onConnectionChange);
   window.addEventListener('visibilitychange', onVisibilityChange);
-  window.addEventListener('pagehide', persist);
+  window.addEventListener('pagehide', onPageHide);
 });
 
 onBeforeUnmount(() => {
   window.removeEventListener('online', onConnectionChange);
   window.removeEventListener('offline', onConnectionChange);
   window.removeEventListener('visibilitychange', onVisibilityChange);
-  window.removeEventListener('pagehide', persist);
-  persist();
+  window.removeEventListener('pagehide', onPageHide);
 });
 </script>
 
@@ -415,6 +470,31 @@ onBeforeUnmount(() => {
           </template>
         </div>
         <div v-else class="empty-state"><strong>暂无学生作答</strong>学习端提交听写后，这里会出现练习记录。</div>
+      </div>
+
+      <div v-if="saveBanner.show" class="sync-banner" :class="saveBanner.kind">
+        <span>{{ saveBanner.message }}</span>
+        <button v-if="saveBanner.kind === 'conflict' && activeConflict" class="sync-action" @click="openConflictModal">查看冲突</button>
+        <button v-if="saveBanner.kind === 'replay' || saveBanner.kind === 'migration'" class="sync-action" @click="retrySave">重试</button>
+      </div>
+
+      <div v-if="activeConflict && conflictModalOpen" class="conflict-mask" role="dialog" aria-modal="true" aria-label="保存冲突">
+        <div class="conflict-dialog">
+          <h3>检测到其他标签页已修改</h3>
+          <p class="conflict-lesson">{{ lessonById(activeConflict.lessonId)?.title ?? activeConflict.lessonId }}</p>
+          <p class="conflict-hint">本课节在你编辑期间被别处改动，你的草稿已保留。请确认是否合并后再提交。</p>
+          <ul class="conflict-list">
+            <li v-for="(change, index) in activeConflict.changes" :key="`${change.kind}-${change.sentenceId ?? change.attemptId ?? index}`">
+              <span class="conflict-kind">{{ change.kind === 'progress' ? '作答' : change.kind === 'attempt' ? '提交' : change.kind === 'feedback' ? '反馈' : '分类' }}</span>
+              <span>{{ conflictChangeLabel(change) }}</span>
+            </li>
+            <li v-if="!activeConflict.changes.length" class="conflict-empty">有改动但未列出明细。</li>
+          </ul>
+          <div class="conflict-actions">
+            <var-button block type="primary" @click="onConfirmMerge(activeConflict)">确认合并并提交</var-button>
+            <var-button block type="default" variant="outline" style="margin-top: 8px" @click="onCancelConflict(activeConflict)">保留草稿，稍后处理</var-button>
+          </div>
+        </div>
       </div>
 
       <div v-if="toast" style="position: fixed; z-index: 30; left: 50%; bottom: 28px; transform: translateX(-50%); padding: 11px 16px; border-radius: 12px; background: #17233d; color: white; font-size: .78rem; box-shadow: 0 10px 30px rgb(0 0 0 / .2)">{{ toast }}</div>

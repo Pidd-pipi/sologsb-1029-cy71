@@ -122,6 +122,22 @@ button, input, textarea { font: inherit; }
 .segmented button.active { background: var(--card); color: var(--text); box-shadow: 0 1px 5px rgb(0 0 0 / .09); font-weight: 700; }
 .empty-state { text-align: center; padding: 36px 20px; color: var(--muted); }
 .empty-state strong { display: block; color: var(--text); margin-bottom: 7px; }
+.sync-banner { position: fixed; z-index: 40; top: max(12px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); width: calc(100% - 24px); max-width: 536px; display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 13px; font-size: .74rem; box-shadow: 0 10px 30px rgb(0 0 0 / .18); background: #fff6dc; color: #795300; }
+.sync-banner.conflict { background: #fff0f0; color: #a02630; }
+.sync-banner.quota { background: #fff0f0; color: #a02630; }
+.sync-banner.replay, .sync-banner.migration { background: #e9f2ff; color: #124a8f; }
+.sync-banner span { flex: 1; }
+.sync-action { border: 0; border-radius: 9px; padding: 7px 12px; background: var(--primary); color: white; font-size: .72rem; font-weight: 700; cursor: pointer; white-space: nowrap; }
+.conflict-mask { position: fixed; inset: 0; z-index: 50; background: rgb(16 23 34 / .55); display: grid; place-items: center; padding: 20px; }
+.conflict-dialog { width: 100%; max-width: 420px; background: var(--card); color: var(--text); border-radius: 20px; padding: 20px 18px; box-shadow: 0 24px 60px rgb(0 0 0 / .3); }
+.conflict-dialog h3 { margin: 0 0 6px; font-size: 1.02rem; }
+.conflict-lesson { margin: 0 0 8px; color: var(--primary); font-size: .78rem; font-weight: 700; }
+.conflict-hint { margin: 0 0 12px; color: var(--muted); font-size: .74rem; line-height: 1.6; }
+.conflict-list { list-style: none; margin: 0 0 16px; padding: 0; max-height: 40vh; overflow-y: auto; display: grid; gap: 8px; }
+.conflict-list li { display: flex; align-items: center; gap: 8px; padding: 9px 11px; border-radius: 11px; background: var(--soft); font-size: .74rem; line-height: 1.5; }
+.conflict-kind { flex: 0 0 auto; border-radius: 999px; background: var(--primary); color: white; padding: 2px 8px; font-size: .64rem; font-weight: 700; }
+.conflict-empty { color: var(--muted); }
+.conflict-actions { margin-top: 4px; }
 @media (min-width: 600px) {
   body { padding: 18px 0; }
   .app-shell { min-height: calc(100dvh - 36px); border-radius: 28px; }
